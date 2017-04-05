@@ -37,16 +37,21 @@ import java.util.Set;
 import java.util.Vector;
 import java.util.AbstractMap;
 import java.util.regex.*;
+import java.util.Date;
 
 import com.yahoo.ycsb.DB;
 import com.yahoo.ycsb.DBException;
 import com.yahoo.ycsb.ByteIterator;
 import com.yahoo.ycsb.StringByteIterator;
+import com.yahoo.ycsb.Status;
 
 import org.hyperdex.client.ByteString;
 import org.hyperdex.client.Client;
 import org.hyperdex.client.HyperDexClientException;
 import org.hyperdex.client.Iterator;
+import org.hyperdex.client.GreaterEqual;
+import org.hyperdex.client.LessThan;
+import org.hyperdex.client.Range;
 
 public class HyperDex extends DB
 {
@@ -55,6 +60,8 @@ public class HyperDex extends DB
     private Matcher m_mat;
     private boolean m_scannable;
     private int m_retries;
+    private int count; 
+    private int print_every;
 
     /**
      * Initialize any state for this DB.
@@ -62,6 +69,7 @@ public class HyperDex extends DB
      */
     public void init() throws DBException
     {
+//	System.out.println("HypderDex init()\n");
         String host = getProperties().getProperty("hyperdex.host", "127.0.0.1");
         Integer port = Integer.parseInt(getProperties().getProperty("hyperdex.port", "1982"));
         m_client = new Client(host, port);
@@ -69,6 +77,12 @@ public class HyperDex extends DB
         m_mat = m_pat.matcher("user1");
         m_scannable = getProperties().getProperty("hyperdex.scannable", "false").equals("true");
         m_retries = 10;
+	System.out.println("HypderDex init() complete.");
+	if (m_scannable) {
+		System.out.println("HyperDex is set to be scannable.");
+	}
+	count = 0; 
+	print_every = 250000; 
     }
 
     /**
@@ -77,6 +91,14 @@ public class HyperDex extends DB
      */
     public void cleanup() throws DBException
     {
+    }
+
+    public void updateCount() {
+	count++;
+    	if (count % print_every == 0) {
+//                System.out.print(new Date() + "   ");
+                System.out.println(new Date() + "   " + count + " operations complete.");
+        }
     }
 
     /**
@@ -88,8 +110,10 @@ public class HyperDex extends DB
      * @param result A HashMap of field/value pairs for the result
      * @return Zero on success, a non-zero error code on error or "not found".
      */
-    public int read(String table, String key, Set<String> fields, HashMap<String,ByteIterator> result)
+    public Status read(String table, String key, Set<String> fields, HashMap<String,ByteIterator> result)
     {
+	updateCount();
+
         while (true)
         {
             Map map = new HashMap<String,Object>();
@@ -105,15 +129,15 @@ public class HyperDex extends DB
                     continue;
                 }
 
-                return 1;
+                return Status.ERROR;
             }
             catch(Exception e)
             {
-                return 1;
+                return Status.ERROR;
             }
 
             convert_to_java(fields, map, result);
-            return 0;
+            return Status.OK;
         }
     }
 
@@ -127,8 +151,10 @@ public class HyperDex extends DB
      * @param result A Vector of HashMaps, where each HashMap is a set field/value pairs for one record
      * @return Zero on success, a non-zero error code on error.  See this class's description for a discussion of error codes.
      */
-    public int scan(String table, String startkey, int recordcount, Set<String> fields, Vector<HashMap<String,ByteIterator>> result)
+    public Status scan(String table, String startkey, int recordcount, Set<String> fields, Vector<HashMap<String,ByteIterator>> result)
     {
+	updateCount();
+
         while (true)
         {
             // XXX I'm going to be lazy and not support "fields" for now.  Patches
@@ -136,48 +162,64 @@ public class HyperDex extends DB
 
             if (!m_scannable)
             {
-                return 1;
+//		System.out.println("m_scannable is false !");
+                return Status.ERROR;
             }
 
             m_mat.reset(startkey);
 
             if (!m_mat.matches())
             {
-                return 2;
+//		System.out.println("m_mat.matches() is false !");
+                return Status.ERROR;
             }
 
             long base = Long.parseLong(m_mat.group(2));
             long lower = base << 32;
             long upper = (base + recordcount) << 32;
 
+	    System.out.println("count: " + count + " base: " + base + " lower: " + lower + " upper: " + upper + " recordcount: " + recordcount);
+
             HashMap<String,Object> values = new HashMap<String,Object>();
             AbstractMap.SimpleEntry<Long,Long> range
                 = new AbstractMap.SimpleEntry<Long,Long>(lower,upper);
             values.put("recno", range);
+//	    values.put("recno", new GreaterEqual(lower)); 
+//	    values.put("recno", new LessThan(upper));
+//	    values.put("recno", new Range(lower, upper)); 
 
+	    //System.out.println("values: " + values.toString());
+	    
             try
             {
                 Iterator s = m_client.search(table, values);
+		int cnt = 1;
 
-                while (s.hasNext())
+                while (s.hasNext() &&  cnt < recordcount)
                 {
                     s.next();
+//		    cnt++;
                 }
 
-                return 0;
+//		System.out.println("Number of values scanned: " + cnt);
+                return Status.OK;
             }
             catch(HyperDexClientException e)
             {
+		System.out.println("HyperDexClientException: ");
+		e.printStackTrace();
+
                 if (e.status() == 8517)
                 {
                     continue;
                 }
 
-                return 1;
+                return Status.ERROR;
             }
             catch(Exception e)
             {
-                return 3;
+//		e.printStackTrace();
+                return Status.ERROR;
             }
         }
     }
@@ -191,8 +233,11 @@ public class HyperDex extends DB
      * @param values A HashMap of field/value pairs to update in the record
      * @return Zero on success, a non-zero error code on error.  See this class's description for a discussion of error codes.
      */
-    public int update(String table, String key, HashMap<String,ByteIterator> _values)
+    public Status update(String table, String key, HashMap<String,ByteIterator> _values)
     {
+	updateCount();
+
+//	System.out.println("HyperDex update() called. \n");
         while (true)
         {
             HashMap<String,Object> values = new HashMap<String,Object>();
@@ -208,7 +253,8 @@ public class HyperDex extends DB
 
                 if (!m_mat.matches())
                 {
-                    return -1;
+		    System.out.println("m_mat doesn't match. \n");
+                    return Status.ERROR;
                 }
 
                 long num = Long.parseLong(m_mat.group(2));
@@ -217,22 +263,25 @@ public class HyperDex extends DB
 
             try
             {
+//		System.out.println("Calling client.put\n");
                 m_client.put(table, key, values);
-                return 0;
+                return Status.OK;
             }
             catch(HyperDexClientException e)
             {
+		e.printStackTrace();
                 if (e.status() == 8517)
                 {
                     continue;
                 }
 
-                return 1;
+                return Status.ERROR;
             }
             catch(Exception e)
             {
+		e.printStackTrace();
                 System.err.println(e.toString());
-                return 1;
+                return Status.ERROR;
             }
         }
     }
@@ -246,7 +295,7 @@ public class HyperDex extends DB
      * @param values A HashMap of field/value pairs to insert in the record
      * @return Zero on success, a non-zero error code on error.  See this class's description for a discussion of error codes.
      */
-    public int insert(String table, String key, HashMap<String,ByteIterator> values)
+    public Status insert(String table, String key, HashMap<String,ByteIterator> values)
     {
         return update(table, key, values);
     }
@@ -258,14 +307,16 @@ public class HyperDex extends DB
      * @param key The record key of the record to delete.
      * @return Zero on success, a non-zero error code on error.  See this class's description for a discussion of error codes.
      */
-    public int delete(String table, String key)
+    public Status delete(String table, String key)
     {
+	updateCount();
+
         while (true)
         {
             try
             {
                 m_client.del(table, key);
-                return 0;
+                return Status.OK;
             }
             catch(HyperDexClientException e)
             {
@@ -274,11 +325,11 @@ public class HyperDex extends DB
                     continue;
                 }
 
-                return 1;
+                return Status.ERROR;
             }
             catch(Exception e)
             {
-                return 1;
+                return Status.ERROR;
             }
         }
     }
@@ -300,3 +351,4 @@ public class HyperDex extends DB
         }
     }
 }
+
